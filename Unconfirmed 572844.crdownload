@@ -1,0 +1,86 @@
+const $=s=>document.querySelector(s);
+const sha=async t=>[...new Uint8Array(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(t)))].map(b=>b.toString(16).padStart(2,"0")).join("");
+const store={get:(k,d)=>{try{return JSON.parse(localStorage.getItem(k))??d}catch{return d}},set:(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v))}catch{}}};
+const EXP=[[5,"5 sec"],[10,"10 sec"],[15,"15 sec"],[30,"30 sec"],[60,"1 min"],[120,"2 min"],[300,"5 min"],[600,"10 min"],[900,"15 min"],[1800,"30 min"],[3600,"1 hour"],[7200,"2 hours"],[14400,"4 hours"]];
+const lab=s=>(EXP.find(e=>e[0]===s)||[0,s+"s"])[1];
+const pad=n=>String(n).padStart(2,"0");
+const fmt=d=>{d=new Date(d);return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`};
+
+/* password gate */
+async function unlock(){ $("#gate").hidden=true; $("#app").hidden=false; sessionStorage.setItem("ok","1"); renderSigs(); }
+$("#gateForm").addEventListener("submit",async e=>{e.preventDefault();
+  if(await sha($("#pw").value)===window.PW_HASH) unlock(); else $("#gateErr").textContent="Wrong password. Try again.";});
+try{ if(sessionStorage.getItem("ok")) unlock(); }catch{}
+
+/* tabs + clock */
+document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>{
+  document.querySelectorAll("nav button").forEach(x=>x.classList.toggle("on",x===b));
+  document.querySelectorAll(".tab").forEach(t=>t.hidden=t.id!==b.dataset.tab);});
+setInterval(()=>$("#clock").textContent=new Date().toLocaleString()+" (local time)",1000);
+
+/* image + pins */
+let pins=[],cur=null;
+$("#img").onchange=e=>{const f=e.target.files[0];if(!f)return;$("#preview").src=URL.createObjectURL(f);pins=[];draw();};
+$("#imgWrap").onclick=e=>{const r=$("#preview").getBoundingClientRect();if(e.clientX<r.left)return;
+  cur={x:e.clientX-r.left,y:e.clientY-r.top};draw();};
+$("#addPin").onclick=()=>{if(!cur)return;pins.push({...cur,price:$("#pinPrice").value,time:new Date()});cur=null;$("#pinPrice").value="";draw();};
+function draw(){
+  $("#pins").innerHTML=[...pins,...(cur?[cur]:[])].map(p=>`<div class="pin" style="left:${p.x}px;top:${p.y}px"></div>`).join("");
+  $("#pinList").innerHTML=pins.map(p=>`<li><span>Pin at ${p.price||"?"}</span><span>${fmt(p.time)}</span></li>`).join("");}
+
+/* indicators */
+const ema=(a,n)=>{const k=2/(n+1);let e=a[0];return a.map(v=>e=v*k+e*(1-k));};
+function rsi(c,n=14){let g=0,l=0;for(let i=1;i<=n;i++){const d=c[i]-c[i-1];d>0?g+=d:l-=d;}g/=n;l/=n;
+  for(let i=n+1;i<c.length;i++){const d=c[i]-c[i-1];g=(g*(n-1)+Math.max(d,0))/n;l=(l*(n-1)+Math.max(-d,0))/n;}
+  return l===0?100:100-100/(1+g/l);}
+function parse(t){return t.trim().split(/\n+/).map(l=>l.split(/[,\s;]+/).map(Number)).filter(r=>r.length&&r.every(isFinite))
+  .map(r=>r.length>=4?{o:r[0],h:r[1],l:r[2],c:r[3]}:{o:r[0],h:r[0],l:r[0],c:r[r.length-1]});}
+function candlePattern(a,b){ // a=previous, b=last
+  const body=x=>Math.abs(x.c-x.o),rng=x=>x.h-x.l||1e-9;
+  const up=x=>x.c>x.o,dn=x=>x.c<x.o;
+  if(dn(a)&&up(b)&&b.c>=a.o&&b.o<=a.c)return {n:"Bullish engulfing",s:1};
+  if(up(a)&&dn(b)&&b.o>=a.c&&b.c<=a.o)return {n:"Bearish engulfing",s:-1};
+  const lw=Math.min(b.o,b.c)-b.l,uw=b.h-Math.max(b.o,b.c);
+  if(lw>2*body(b)&&uw<body(b))return {n:"Hammer / pin bar (bullish)",s:1};
+  if(uw>2*body(b)&&lw<body(b))return {n:"Shooting star (bearish)",s:-1};
+  if(body(b)<rng(b)*.1)return {n:"Doji (indecision)",s:0};
+  return {n:"No clear pattern",s:0};}
+
+$("#analyse").onclick=()=>{
+  const k=parse($("#candles").value),out=$("#result");
+  if(k.length<30){out.innerHTML=`<p class="hint">Need at least 30 candles. You pasted ${k.length}.</p>`;return;}
+  const c=k.map(x=>x.c),e9=ema(c,9).at(-1),e21=ema(c,21).at(-1),e50=ema(c,50).at(-1),R=rsi(c),last=c.at(-1);
+  const p=candlePattern(k.at(-2),k.at(-1));
+  const hi=Math.max(...k.slice(-10).map(x=>x.h)),lo=Math.min(...k.slice(-10).map(x=>x.l));
+  const range=hi-lo,sideways=Math.abs(e9-e21)<range*.05;
+  let s=0;s+=e9>e21?1:-1;s+=last>e50?1:-1;s+=R>50&&R<70?1:R<50&&R>30?-1:0;s+=p.s;
+  const call=sideways||Math.abs(s)<2?"WAIT":s>0?"BUY":"SELL";
+  const dec=last<1?5:2,now=Date.now();
+  const checks=EXP.map(([s,n])=>`<li><span>${n} expiry${s<60?" (noise)":""}</span><span>${fmt(now+s*1e3)}</span></li>`).join("");
+  out.innerHTML=`<div class="verdict ${call}">${call==="WAIT"?"No trade: signals disagree or market is sideways":call+" bias"}</div>
+  <ul><li><span>${$("#pair").value} ${$("#tf").value}, price now</span><span>${last.toFixed(dec)}</span></li>
+  <li><span>EMA 9 / 21 / 50</span><span>${e9.toFixed(dec)} / ${e21.toFixed(dec)} / ${e50.toFixed(dec)}</span></li>
+  <li><span>RSI 14</span><span>${R.toFixed(1)}</span></li>
+  <li><span>Last candle</span><span>${p.n}</span></li>
+  <li><span>Stop reference (10-candle swing)</span><span>${(call==="SELL"?hi:lo).toFixed(dec)}</span></li>
+  <li><span>Signal time</span><span>${fmt(now)}</span></li>${checks}</ul>
+  <p class="hint">This is a rule-based bias from past candles. It does not know where price will be later, and no method does. Log it in Signal Log to see how it really performs.</p>`;
+  $("#sPair").value=$("#pair").value;$("#sPrice").value=last.toFixed(dec);if(call!=="WAIT")$("#sDir").value=call;};
+
+/* signal log */
+$("#sHz").innerHTML=EXP.map(([s,n])=>`<option value="${s}"${s===60?" selected":""}>${n}</option>`).join("");
+let sigs=store.get("sigs2",[]);
+$("#addSig").onclick=()=>{const p=parseFloat($("#sPrice").value);if(!isFinite(p))return;
+  sigs.unshift({id:Date.now(),pair:$("#sPair").value,dir:$("#sDir").value,entry:p,t:Date.now(),sec:+$("#sHz").value,close:null});
+  store.set("sigs2",sigs);renderSigs();};
+function renderSigs(){
+  const done=sigs.filter(s=>s.close!==null),w=done.filter(s=>(s.dir==="BUY"?s.close>s.entry:s.close<s.entry)).length;
+  $("#stats").innerHTML=`<p class="hint">Closed: ${done.length}. Wins: ${w}. Your real win rate: ${done.length?Math.round(w/done.length*100)+"%":"n/a"}</p>`;
+  $("#sigList").innerHTML=sigs.map(s=>{const due=s.t+s.sec*1e3,left=due-Date.now();
+    let r;if(s.close!==null){const win=s.dir==="BUY"?s.close>s.entry:s.close<s.entry;r=`<span class="${win?"BUY":"SELL"}">${win?"WIN":"LOSS"} at ${s.close}</span>`;}
+    else if(left>0)r=`<span>Closes ${fmt(due)}, ${Math.ceil(left/1000)}s left</span>`;
+    else r=`<span><input size="9" id="c${s.id}" placeholder="price now"> <button onclick="closeSig(${s.id})">Save</button></span>`;
+    return `<li><span><b class="${s.dir}">${s.dir}</b> ${s.pair} @ ${s.entry}<br><small>${fmt(s.t)}, ${lab(s.sec)}</small></span>${r}</li>`;}).join("")||`<li class="hint">No signals yet.</li>`;}
+window.closeSig=id=>{const v=parseFloat(document.getElementById("c"+id).value);if(!isFinite(v))return;
+  sigs.find(s=>s.id===id).close=v;store.set("sigs2",sigs);renderSigs();};
+setInterval(()=>{if(!$("#app").hidden&&!document.activeElement?.id?.startsWith("c"))renderSigs();},1000);
